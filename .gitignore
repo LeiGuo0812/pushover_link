@@ -1,0 +1,31 @@
+# Local runtime data and secrets
+credentials.json
+installation.json
+notification-options.json
+hooks.json
+config.toml
+auth.json
+.env
+.env.*
+.codex/
+events/
+state/
+prompts/
+commands/
+quarantine/
+backups/
+*.log
+*heartbeat.json
+*snapshot.json
+*.stdout.txt
+*.stderr.txt
+
+# Build and validation outputs
+artifacts/
+src/*.exe
+src/*.dll
+src/app.ico
+src/app-mark.png
+src/ui-validation*/
+*.tmp
+*.pdb
