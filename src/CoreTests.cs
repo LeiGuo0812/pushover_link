@@ -46,6 +46,16 @@ public static class CoreTests
     static string Hook(string kind, string turn, string text) { return (string)Core.HandleHook(js.Serialize(Event(kind, turn, text)))["outcome"]; }
     static Dictionary<string, object> State(string turn) { return Core.ReadObject(F("state\\" + Core.EventId("session-中文😀", turn) + ".json")); }
     static Dictionary<string, object> Notification(string turn) { return (Dictionary<string, object>)State(turn)["notification"]; }
+    const string SuggestionPrompt = "This is an app-generated request for a suggested next user message. The user did not write this message.\n\nYour suggestion will appear in the user's empty message composer.";
+    static string Ask(string turn, string call, bool asyncTool)
+    {
+        var e = Event("PreToolUse", turn, ""); e.Remove("prompt");
+        e["tool_name"] = asyncTool ? "functions.request_user_input_async" : "request_user_input"; e["tool_use_id"] = call;
+        var q = O(); q[asyncTool ? "title" : "question"] = "请选择处理方式？";
+        q["options"] = asyncTool ? new object[] { "继续", "稍后" } : new object[] { new Dictionary<string, object> { {"label", "继续"}, {"description", "开始处理"} }, new Dictionary<string, object> { {"label", "稍后"} } };
+        e["tool_input"] = new Dictionary<string, object> { {"questions", new object[] { q }} };
+        return (string)Core.HandleHook(js.Serialize(e))["outcome"];
+    }
     static void Test(string name, Action action) { Fresh(); action(); passed++; Console.WriteLine("PASS " + name); }
     public static int Main(string[] args)
     {
@@ -93,6 +103,70 @@ public static class CoreTests
                 Core.WriteObject(F("prompts\\" + Core.EventId("session-中文😀", "legacy-suggestion") + ".json"), saved);
                 Require(Hook("Stop", "legacy-suggestion", "{\"suggestion\":\"旧回合建议\"}") == "ignored_suggestion", "legacy cached suggestion queued");
                 Require(Core.Cycle() == "idle", "legacy suggestion sent");
+            });
+            Test("suggestion opt-in persists and sends only proposed text", delegate {
+                Core.SetOption(Core.SuggestionOption, true); Core.Initialize(directory);
+                Require(Core.OptionEnabled(Core.SuggestionOption) && !Core.OptionEnabled(Core.InputOption), "independent persisted option");
+                Require(Hook("UserPromptSubmit", "opt-in", SuggestionPrompt + "\nPRIVATE_CONTEXT") == "captured_suggestion", "marker");
+                Require(Hook("Stop", "opt-in", "{\"suggestion\":\"继续检查结果\"}") == "queued" && Core.Cycle() == "accepted", "suggestion delivery");
+                var n = Notification("opt-in"); string body = (string)n["message"];
+                Require((string)n["title"] == "Codex 有新的输入建议" && body.Contains("继续检查结果") && !body.Contains("PRIVATE_CONTEXT") && !body.Contains("用户输入"), "unsafe suggestion body");
+                Require(!File.ReadAllText(F("prompts\\" + Core.EventId("session-中文😀", "opt-in") + ".json")).Contains("PRIVATE_CONTEXT"), "context persisted");
+                Require(Hook("Stop", "opt-in", "{\"suggestion\":\"changed\"}") == "duplicate" && Core.Cycle() == "idle", "duplicate suggestion");
+            });
+            Test("empty malformed and null suggestions are silent", delegate {
+                Core.SetOption(Core.SuggestionOption, true); int calls = 0; Core.TestTransport = delegate { calls++; return new SendResult(); };
+                string[] replies = { "{\"suggestion\":null}", "{\"suggestion\":\"  \"}", "malformed", "{\"unexpected\":\"context\"}" };
+                for (int i = 0; i < replies.Length; i++) { string turn = "empty" + i; Hook("UserPromptSubmit", turn, SuggestionPrompt); Require(Hook("Stop", turn, replies[i]) == "empty_suggestion", "empty suggestion queued"); }
+                Require(Core.Cycle() == "idle" && calls == 0, "empty called API");
+            });
+            Test("category off cancels pending retries without affecting replies", delegate {
+                Core.SetOption(Core.SuggestionOption, true); Hook("UserPromptSubmit", "off", SuggestionPrompt); Hook("Stop", "off", "{\"suggestion\":\"draft\"}");
+                Core.TestTransport = delegate { return new SendResult { Network = true }; }; Require(Core.Cycle() == "retry", "retry");
+                Core.SetOption(Core.SuggestionOption, false); Require((string)State("off")["outcome"] == "suppressed", "pending not cancelled during backoff");
+                Core.SetOption(Core.SuggestionOption, true); now += 5000; int calls = 0;
+                Core.TestTransport = delegate { calls++; return new SendResult { Http = 200, Status = 1 }; };
+                Hook("Stop", "normal", "正式回复"); Require(Core.Cycle() == "accepted" && Core.Cycle() == "idle" && calls == 1, "cancelled suggestion replayed");
+                Require(Convert.ToInt64(Core.Status()["suppressed"]) == 1 && Convert.ToInt64(Core.Status()["pending"]) == 0, "cancel counts");
+            });
+            Test("input requests default off and require explicit valid identifiers", delegate {
+                Require(Ask("ask", "c1", false) == "input_notifications_disabled", "old options enabled input");
+                Core.SetOption(Core.InputOption, true);
+                var e = Event("PreToolUse", "ask", ""); e["tool_name"] = "request_user_input";
+                Require((string)Core.HandleHook(js.Serialize(e))["outcome"] == "missing_tool_use_id", "missing call accepted");
+                e["tool_use_id"] = "c1"; Require((string)Core.HandleHook(js.Serialize(e))["outcome"] == "missing_questions", "missing questions accepted");
+                e["tool_name"] = "Bash"; Require((string)Core.HandleHook(js.Serialize(e))["outcome"] == "ignored_tool", "other tool captured");
+                e["tool_name"] = "request_user_input"; e["agent_id"] = "child"; Require((string)Core.HandleHook(js.Serialize(e))["outcome"] == "ignored_subagent", "subagent captured");
+            });
+            Test("same-turn questions and Stop have separate stable dedup keys", delegate {
+                Core.SetOption(Core.InputOption, true);
+                Require(Ask("one", "call-a", false) == "queued" && Ask("one", "call-a", false) == "duplicate", "question dedup");
+                Require(Ask("one", "call-b", true) == "queued" && Hook("Stop", "one", "正式回复") == "queued", "question or Stop swallowed");
+                int calls = 0, questions = 0; Core.TestTransport = delegate(Dictionary<string, object> n, string t, string u) {
+                    calls++; if ((string)n["title"] == "Codex 需要你回答") { questions++; Require(((string)n["message"]).Contains("请选择处理方式？") && ((string)n["message"]).Contains("• 继续") && ((string)n["message"]).Contains("• 稍后"), "question/options missing"); }
+                    return new SendResult { Http = 200, Status = 1 };
+                };
+                for (int i = 0; i < 3; i++) Require(Core.Cycle() == "accepted", "missing notification");
+                Require(calls == 3 && questions == 2 && Core.Cycle() == "idle", "wrong counts");
+                Ask("two", "call-a", true); Require(Core.Cycle() == "accepted", "next turn swallowed");
+            });
+            Test("concurrent duplicate input requests publish once", delegate {
+                Core.SetOption(Core.InputOption, true); int queued = 0; Exception error = null;
+                var threads = new Thread[16]; for (int i = 0; i < threads.Length; i++) { threads[i] = new Thread(delegate() { try { if (Ask("ask", "same-call", true) == "queued") Interlocked.Increment(ref queued); } catch (Exception e) { error = e; } }); threads[i].Start(); }
+                foreach (var thread in threads) thread.Join(); Require(error == null && queued == 1 && Core.Cycle() == "accepted", "concurrent input dedup");
+            });
+            Test("input opt-out leaves suggestion opt-in and accepted history intact", delegate {
+                Core.SetOption(Core.InputOption, true); Core.SetOption(Core.SuggestionOption, true);
+                Ask("a", "accepted", true); Core.Cycle(); string path = F("state\\" + Core.InputEventId("session-中文😀", "a", "accepted") + ".json"), accepted = File.ReadAllText(path);
+                Ask("b", "pending", true); Core.SetOption(Core.InputOption, false); Core.Initialize(directory);
+                Require(File.ReadAllText(path) == accepted && Core.OptionEnabled(Core.SuggestionOption) && !Core.OptionEnabled(Core.InputOption), "accepted/options changed");
+                Core.SetOption(Core.InputOption, true); Require(Core.Cycle() == "idle", "cancelled question replayed");
+                Core.SetEnabled(false); Require(Ask("c", "disabled", true) == "disabled", "master switch bypassed");
+            });
+            Test("interaction Unicode body fits API limit and marks truncation", delegate {
+                Core.SetOption(Core.SuggestionOption, true); Hook("UserPromptSubmit", "long", SuggestionPrompt);
+                Hook("Stop", "long", js.Serialize(new Dictionary<string, object> { {"suggestion", new String('问', 2000) + "😀"} })); Core.Cycle();
+                string body = (string)Notification("long")["message"]; Require(Core.CharacterCount(body) <= 1024 && body.Contains("已截断"), "long suggestion");
             });
             Test("session-turn keys retain existing Node JSON SHA256 compatibility", delegate {
                 Require(Core.EventId("session-中文😀", "turn-1") == "e027ab7670a603ccdb40c99ec2640793daa4f03246bfa9b00d034b431815027b", "Unicode key mismatch");

@@ -7,7 +7,7 @@ $process=Start-Process -FilePath $csc -ArgumentList $line -Wait -PassThru -Windo
 Get-Content (Join-Path $PSScriptRoot 'ui-compile.stdout.txt'); Get-Content (Join-Path $PSScriptRoot 'ui-compile.stderr.txt')
 if($process.ExitCode){throw ('UI harness compile failed: '+$process.ExitCode)}
 $folder=Join-Path $PSScriptRoot 'ui-validation'
-$scenarios=@('preview','minimum','wide','scale-125','scale-150','scale-200','native-dpi')
+$scenarios=@('preview','minimum','minimum-scrolled','wide','scale-125','scale-150','scale-200','native-dpi')
 $results=@()
 foreach($scenario in $scenarios){
  $process=Start-Process -FilePath (Join-Path $PSScriptRoot 'UiRenderHarness.exe') -ArgumentList ('"'+$folder+'" "'+$scenario+'"') -Wait -PassThru -WindowStyle Hidden -RedirectStandardOutput (Join-Path $PSScriptRoot 'ui-render.stdout.txt') -RedirectStandardError (Join-Path $PSScriptRoot 'ui-render.stderr.txt')
@@ -17,3 +17,4 @@ foreach($scenario in $scenarios){
 }
 @{method='Separate processes for own control rendering; no tray, sender or production data access';scenarios=$results}|ConvertTo-Json -Depth 10|Set-Content -Encoding UTF8 (Join-Path $folder 'results.json')
 $results|Select-Object scenario,constructorClient,clientSize,outerSize,scale,@{n="errorCount";e={$_.errors.Count}},@{n="ellipsisCount";e={$_.expectedEllipsis.Count}},scrollHeight,scrollViewport,leafCount|ConvertTo-Json -Depth 7
+if (@($results | Where-Object {$_.errors.Count -gt 0}).Count) { throw 'UI layout validation failed.' }

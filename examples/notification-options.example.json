@@ -1,0 +1,7 @@
+{
+  "content_mode": "user_input",
+  "user_input_max_chars": 200,
+  "conversation_title_max_chars": 200,
+  "notify_composer_suggestions": false,
+  "notify_input_requests": false
+}

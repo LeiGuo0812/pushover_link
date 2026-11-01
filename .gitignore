@@ -2,6 +2,7 @@
 credentials.json
 installation.json
 notification-options.json
+control.json
 hooks.json
 config.toml
 auth.json
@@ -16,6 +17,14 @@ quarantine/
 backups/
 *.log
 *heartbeat.json
+*last-launch.json
+DISABLED
+APP_STOPPED
+APP_MIGRATING
+MAINTENANCE
+*.lock
+diagnostic-network-failure-once.json
+interaction-notifications-validation.json
 *snapshot.json
 *.stdout.txt
 *.stderr.txt

@@ -1,0 +1,32 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [{
+      "hooks": [{
+        "type": "command",
+        "command": "\"/mnt/c/Users/REPLACE_WITH_WINDOWS_USER/AppData/Local/CodexPushover/CodexPushover.exe\" hook",
+        "commandWindows": "cmd.exe /d /c call \"%LOCALAPPDATA%\\CodexPushover\\CodexPushover.exe\" hook",
+        "timeout": 3,
+        "statusMessage": "保存 Pushover 本轮用户输入（EXE）"
+      }]
+    }],
+    "Stop": [{
+      "hooks": [{
+        "type": "command",
+        "command": "\"/mnt/c/Users/REPLACE_WITH_WINDOWS_USER/AppData/Local/CodexPushover/CodexPushover.exe\" hook",
+        "commandWindows": "cmd.exe /d /c call \"%LOCALAPPDATA%\\CodexPushover\\CodexPushover.exe\" hook",
+        "timeout": 3,
+        "statusMessage": "保存 Pushover 待发通知（EXE）"
+      }]
+    }],
+    "PreToolUse": [{
+      "matcher": "^(functions\\.)?request_user_input(_async)?$",
+      "hooks": [{
+        "type": "command",
+        "command": "\"/mnt/c/Users/REPLACE_WITH_WINDOWS_USER/AppData/Local/CodexPushover/CodexPushover.exe\" hook",
+        "commandWindows": "cmd.exe /d /c call \"%LOCALAPPDATA%\\CodexPushover\\CodexPushover.exe\" hook",
+        "timeout": 3,
+        "statusMessage": "Pushover 提问与选择提醒（EXE）"
+      }]
+    }]
+  }
+}

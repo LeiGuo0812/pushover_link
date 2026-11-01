@@ -16,8 +16,8 @@ using System.Windows.Forms;
 [assembly: AssemblyTitle("Codex 手机通知")]
 [assembly: AssemblyDescription("Pushover 托盘通知、持久队列与用户登录启动")]
 [assembly: AssemblyProduct("Codex 手机通知")]
-[assembly: AssemblyVersion("1.1.2.0")]
-[assembly: AssemblyFileVersion("1.1.2.0")]
+[assembly: AssemblyVersion("1.2.1.0")]
+[assembly: AssemblyFileVersion("1.2.1.0")]
 
 namespace CodexPushover
 {
@@ -69,8 +69,9 @@ namespace CodexPushover
             string win = "cmd.exe /d /c call \"" + Host.Exe + "\" hook";
             string wsl = Host.Exe.Replace('\\', '/'); if (wsl.Length > 2 && wsl[1] == ':') wsl = "/mnt/" + Char.ToLowerInvariant(wsl[0]) + wsl.Substring(2);
             string unix = "\"" + wsl + "\" hook";
-            foreach (string name in new [] { "Stop", "UserPromptSubmit" })
+            foreach (string name in new [] { "Stop", "UserPromptSubmit", "PreToolUse" })
             {
+                string statusMessage = name == "Stop" ? "保存 Pushover 待发通知（EXE）" : name == "UserPromptSubmit" ? "保存 Pushover 本轮用户输入（EXE）" : "Pushover 提问与选择提醒（EXE）";
                 object groupsObj; hooks.TryGetValue(name, out groupsObj); var groups = Items(groupsObj); bool installed = false;
                 foreach (object g in groups)
                 {
@@ -82,15 +83,18 @@ namespace CodexPushover
                         {
                             if (installed) throw new InvalidOperationException("Duplicate own hook; installation stopped.");
                             handler["command"] = unix; handler["commandWindows"] = win; handler["type"] = "command";
-                            handler["timeout"] = 3; handler["statusMessage"] = name == "Stop" ? "保存 Pushover 待发通知（EXE）" : "保存 Pushover 本轮用户输入（EXE）";
+                            handler["timeout"] = 3; handler["statusMessage"] = statusMessage;
+                            if (name == "PreToolUse") group["matcher"] = @"^(functions\.)?request_user_input(_async)?$";
                             installed = true;
                         }
                     }
                 }
                 if (!installed)
                 {
-                    var handler = new Dictionary<string, object> { {"type", "command"}, {"command", unix}, {"commandWindows", win}, {"timeout", 3}, {"statusMessage", name == "Stop" ? "保存 Pushover 待发通知（EXE）" : "保存 Pushover 本轮用户输入（EXE）"} };
-                    groups.Add(new Dictionary<string, object> { {"hooks", new object[] { handler }} });
+                    var handler = new Dictionary<string, object> { {"type", "command"}, {"command", unix}, {"commandWindows", win}, {"timeout", 3}, {"statusMessage", statusMessage} };
+                    var added = new Dictionary<string, object> { {"hooks", new object[] { handler }} };
+                    if (name == "PreToolUse") added["matcher"] = @"^(functions\.)?request_user_input(_async)?$";
+                    groups.Add(added);
                 }
                 hooks[name] = groups.ToArray();
             }
@@ -134,7 +138,7 @@ namespace CodexPushover
 
     public static class Program
     {
-        public const string Version = "1.1.2";
+        public const string Version = "1.2.1";
         public static string LastPhase = "starting";
         public static long SenderProgressTicks = DateTime.UtcNow.Ticks;
         static readonly AutoResetEvent wake = new AutoResetEvent(false);
@@ -175,6 +179,12 @@ namespace CodexPushover
                     Output(new Dictionary<string, object>()); return 0;
                 }
                 if (mode == "--guard") { Host.RunGuard(); return 0; }
+                if (mode == "--suggestions" || mode == "--input-reminders")
+                {
+                    if (args.Length != 2 || (args[1] != "on" && args[1] != "off")) throw new ArgumentException();
+                    string option = mode == "--suggestions" ? Core.SuggestionOption : Core.InputOption;
+                    Core.SetOption(option, args[1] == "on"); Output(new { option = option, enabled = args[1] == "on" }); return 0;
+                }
                 if (mode == "--install") { Installation.Install(); Output(new { installed = true, executable = Host.Exe, startup_shortcut = Startup.IsConfigured() }); return 0; }
                 if (mode == "--install-hooks") { Installation.InstallHooks(); Output(new { configured = true, review_required = true }); return 0; }
                 if (mode == "--uninstall") { Installation.Uninstall(); Output(new { uninstalled = true, private_data_retained = true }); return 0; }
@@ -361,6 +371,11 @@ namespace CodexPushover
         public void Toggle() { RunAction(delegate { var current = Core.Status(); Core.SetEnabled(!Convert.ToBoolean(current["enabled"])); Program.Wake(); }, "通知开关已更新。", null); }
         public void SetNotificationEnabled(bool enabled) { RunAction(delegate { Core.SetEnabled(enabled); Program.Wake(); }, enabled ? "手机通知已开启。" : "已暂停，新回合不会加入通知。", null); }
         public void SetStartup(bool enabled) { RunAction(delegate { Startup.Set(enabled); }, enabled ? "已启用登录自动运行。" : "已关闭登录自动运行。", null); }
+        public void SetInteractionOption(string option, bool enabled)
+        {
+            string label = option == Core.SuggestionOption ? "输入框建议提醒" : "需要回答时提醒";
+            RunAction(delegate { Core.SetOption(option, enabled); Program.Wake(); }, label + (enabled ? "已开启并保存。" : "已关闭并保存。"), null);
+        }
         public void Test() { RunAction(delegate { Core.EnqueueTest("EXE托盘通知测试", "验证托盘通知发送。", "这条测试由单文件 EXE 排队，接口接受后仍请确认手机实际收到。"); Program.Wake(); }, "测试通知已排队，请查看手机。", null); }
         public void RunAction(Action work, string done, Action success)
         {

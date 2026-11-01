@@ -143,24 +143,24 @@ namespace CodexPushover
     public sealed class UiInputError : Exception { public UiInputError(string message) : base(message) { } }
     public sealed class DashboardSnapshot
     {
-        public bool Enabled, Blocked, Credentials, Guard, Startup, Maintenance;
+        public bool Enabled, Blocked, Credentials, Guard, Startup, Maintenance, Suggestions, InputRequests;
         public long Accepted, Pending, Errors, Quarantined;
         public static DashboardSnapshot Read()
         {
             var s = Core.Status();
             return new DashboardSnapshot { Enabled = Convert.ToBoolean(s["enabled"]), Blocked = Convert.ToBoolean(s["sender_blocked"]), Credentials = Convert.ToBoolean(s["credentials_ready"]),
-                Guard = Host.IsHealthy("guard", 30), Startup = CodexPushover.Startup.IsConfigured(), Maintenance = Convert.ToBoolean(s["maintenance"]),
+                Guard = Host.IsHealthy("guard", 30), Startup = CodexPushover.Startup.IsConfigured(), Maintenance = Convert.ToBoolean(s["maintenance"]), Suggestions = Convert.ToBoolean(s[Core.SuggestionOption]), InputRequests = Convert.ToBoolean(s[Core.InputOption]),
                 Accepted = Convert.ToInt64(s["accepted"]), Pending = Convert.ToInt64(s["pending"]), Errors = Convert.ToInt64(s["blocked"]), Quarantined = Convert.ToInt64(s["quarantined"]) };
         }
         public static DashboardSnapshot Preview()
-        { return new DashboardSnapshot { Enabled = true, Credentials = true, Guard = true, Startup = true, Accepted = 37, Pending = 0, Errors = 0 }; }
-        public string Key { get { return String.Join("|", new object[] { Enabled, Blocked, Credentials, Guard, Startup, Maintenance, Accepted, Pending, Errors, Quarantined }); } }
+        { return new DashboardSnapshot { Enabled = true, Credentials = true, Guard = true, Startup = true, Suggestions = true, InputRequests = true, Accepted = 37, Pending = 0, Errors = 0 }; }
+        public string Key { get { return String.Join("|", new object[] { Enabled, Blocked, Credentials, Guard, Startup, Maintenance, Suggestions, InputRequests, Accepted, Pending, Errors, Quarantined }); } }
     }
     public sealed class SettingsForm : Form
     {
         readonly TrayContext context;
         readonly Label stateTitle, stateDetail, accepted, pending, errors, feedback;
-        readonly BlueSwitch notifications, startup;
+        readonly BlueSwitch notifications, startup, suggestions, inputRequests;
         readonly NumericUpDown limit;
         readonly TextBox token, user;
         readonly BlueButton save, test, resume;
@@ -175,7 +175,7 @@ namespace CodexPushover
         {
             SuspendLayout();
             context = app; Text = "Codex 手机通知 · 状态与设置"; AutoScaleMode = AutoScaleMode.Dpi; AutoScaleDimensions = new SizeF(96, 96);
-            ClientSize = new Size(920, 740); MinimumSize = new Size(760, 620); StartPosition = FormStartPosition.CenterScreen;
+            ClientSize = new Size(920, 860); MinimumSize = new Size(760, 620); StartPosition = FormStartPosition.CenterScreen;
             Font = UiTheme.TextFont(10, FontStyle.Regular); ForeColor = UiTheme.Ink; BackColor = UiTheme.Canvas;
             DoubleBuffered = true; SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
             ownedIcon = UiAssets.WindowIcon(); Icon = ownedIcon; tips = new ToolTip { AutoPopDelay = 10000, InitialDelay = 400 };
@@ -190,7 +190,7 @@ namespace CodexPushover
             var version = UiTheme.Label("Pushover\nv" + Program.Version, 10, Color.FromArgb(220, 233, 255), false); version.TextAlign = ContentAlignment.MiddleRight; headerGrid.Controls.Add(version, 2, 0); header.Controls.Add(headerGrid); root.Controls.Add(header, 0, 0);
             var scroll = new BufferedPanel { Dock = DockStyle.Fill, AutoScroll = true, BackColor = UiTheme.Canvas, Padding = new Padding(24, 18, 24, 12), Margin = Padding.Empty };
             var body = UiTheme.Table(1); body.Dock = DockStyle.Top; body.AutoSize = true; body.AutoSizeMode = AutoSizeMode.GrowAndShrink; body.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); body.RowCount = 3; body.RowStyles.Clear();
-            body.RowStyles.Add(new RowStyle(SizeType.Absolute, 148)); body.RowStyles.Add(new RowStyle(SizeType.Absolute, 292)); body.RowStyles.Add(new RowStyle(SizeType.Absolute, 42)); scroll.Controls.Add(body); root.Controls.Add(scroll, 0, 1);
+            body.RowStyles.Add(new RowStyle(SizeType.Absolute, 148)); body.RowStyles.Add(new RowStyle(SizeType.Absolute, 404)); body.RowStyles.Add(new RowStyle(SizeType.Absolute, 42)); scroll.Controls.Add(body); root.Controls.Add(scroll, 0, 1);
             var status = new SurfacePanel { Dock = DockStyle.Fill, Margin = new Padding(0, 0, 0, 14), Padding = new Padding(20, 14, 20, 12) };
             var statusGrid = UiTheme.Table(1); statusGrid.RowCount = 3; statusGrid.RowStyles.Clear(); statusGrid.RowStyles.Add(new RowStyle(SizeType.Absolute, 26)); statusGrid.RowStyles.Add(new RowStyle(SizeType.Absolute, 22)); statusGrid.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             stateTitle = UiTheme.Label("正在读取通知状态…", 13, UiTheme.Ink, true); stateDetail = UiTheme.Label("后台发送与手机接收状态分别确认", 9.5f, UiTheme.Muted, false);
@@ -200,18 +200,24 @@ namespace CodexPushover
             statusGrid.Controls.Add(metrics, 0, 2); status.Controls.Add(statusGrid); body.Controls.Add(status, 0, 0);
             var settings = UiTheme.Table(2); settings.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 40)); settings.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 60)); settings.Margin = new Padding(0, 0, 0, 12);
             var settingsCard = new SurfacePanel { Dock = DockStyle.Fill, Margin = new Padding(0, 0, 12, 0), Padding = new Padding(20, 16, 20, 16) };
-            var options = UiTheme.Table(1); options.RowCount = 8; options.RowStyles.Clear();
-            foreach (int height in new [] { 28, 32, 22, 34, 22, 30, 36, 20 }) options.RowStyles.Add(new RowStyle(SizeType.Absolute, height));
+            var options = UiTheme.Table(1); options.RowCount = 12; options.RowStyles.Clear();
+            foreach (int height in new [] { 28, 32, 22, 34, 22, 34, 22, 34, 22, 30, 36, 20 }) options.RowStyles.Add(new RowStyle(SizeType.Absolute, height));
             options.Controls.Add(UiTheme.Label("通知设置", 11, UiTheme.Ink, true), 0, 0);
             notifications = new BlueSwitch { Text = "手机通知", BackColor = Color.White, AccessibleName = "手机通知开关" }; options.Controls.Add(notifications, 0, 1);
             options.Controls.Add(UiTheme.Label("开关立即生效，暂停时保留待发", 9, UiTheme.Muted, false), 0, 2);
             startup = new BlueSwitch { Text = "登录后自动运行", BackColor = Color.White, AccessibleName = "登录自动运行开关" }; options.Controls.Add(startup, 0, 3);
             options.Controls.Add(UiTheme.Label("Windows 登录后进入托盘", 9, UiTheme.Muted, false), 0, 4);
-            options.Controls.Add(UiTheme.Label("用户输入显示上限", 9.5f, UiTheme.Ink, false), 0, 5);
+            suggestions = new BlueSwitch { Text = "输入框建议提醒", BackColor = Color.White, AccessibleName = "输入框建议提醒开关" }; options.Controls.Add(suggestions, 0, 5);
+            options.Controls.Add(UiTheme.Label("推送 Codex 自动生成的下一步建议", 9, UiTheme.Muted, false), 0, 6);
+            inputRequests = new BlueSwitch { Text = "需要回答时提醒", BackColor = Color.White, AccessibleName = "需要回答时提醒开关" }; options.Controls.Add(inputRequests, 0, 7);
+            options.Controls.Add(UiTheme.Label("提问或选择时提醒，需信任新增 hook", 9, UiTheme.Muted, false), 0, 8);
+            tips.SetToolTip(suggestions, "立即保存。关闭后取消尚未发出的建议；已开始发送的请求可能仍会送达。");
+            tips.SetToolTip(inputRequests, "立即保存。支持 request_user_input / request_user_input_async 提问，不代你回答。");
+            options.Controls.Add(UiTheme.Label("用户输入显示上限", 9.5f, UiTheme.Ink, false), 0, 9);
             var limitRow = UiTheme.Table(2); limitRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 98)); limitRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             limit = new NumericUpDown { AutoScaleMode = AutoScaleMode.None, Minimum = 8, Maximum = 400, Value = 200, Font = UiTheme.TextFont(11, FontStyle.Regular), Dock = DockStyle.Fill, Margin = new Padding(0, 3, 10, 3), ForeColor = UiTheme.Ink, BackColor = Color.White, AccessibleName = "用户输入显示字符上限" };
-            limitRow.Controls.Add(limit, 0, 0); limitRow.Controls.Add(UiTheme.Label("字符，调整后保存", 9, UiTheme.Muted, false), 1, 0); options.Controls.Add(limitRow, 0, 6);
-            options.Controls.Add(UiTheme.Label("整条通知最多 1024 字符，超长截断", 8.75f, UiTheme.Muted, false), 0, 7); settingsCard.Controls.Add(options); settings.Controls.Add(settingsCard, 0, 0);
+            limitRow.Controls.Add(limit, 0, 0); limitRow.Controls.Add(UiTheme.Label("字符，调整后保存", 9, UiTheme.Muted, false), 1, 0); options.Controls.Add(limitRow, 0, 10);
+            options.Controls.Add(UiTheme.Label("整条通知最多 1024 字符，超长截断", 8.75f, UiTheme.Muted, false), 0, 11); settingsCard.Controls.Add(options); settings.Controls.Add(settingsCard, 0, 0);
             var credentials = new SurfacePanel { Dock = DockStyle.Fill, Margin = Padding.Empty, Padding = new Padding(20, 16, 20, 16) };
             var fields = UiTheme.Table(1); fields.RowCount = 8; fields.RowStyles.Clear();
             foreach (int height in new [] { 28, 24, 24, 42, 10, 24, 42, 36 }) fields.RowStyles.Add(new RowStyle(SizeType.Absolute, height));
@@ -238,6 +244,8 @@ namespace CodexPushover
             footerGrid.Controls.Add(UiTheme.Label("接口已接受不等于手机已收到。", 8.5f, UiTheme.Muted, false), 0, 2); footer.Controls.Add(footerGrid); root.Controls.Add(footer, 0, 2);
             notifications.CheckedChanged += delegate { if (!updating && context != null) context.SetNotificationEnabled(notifications.Checked); };
             startup.CheckedChanged += delegate { if (!updating && context != null) context.SetStartup(startup.Checked); };
+            suggestions.CheckedChanged += delegate { if (!updating && context != null) context.SetInteractionOption(Core.SuggestionOption, suggestions.Checked); };
+            inputRequests.CheckedChanged += delegate { if (!updating && context != null) context.SetInteractionOption(Core.InputOption, inputRequests.Checked); };
             save.Click += delegate { Save(); }; test.Click += delegate { if (context != null) context.Test(); }; resume.Click += delegate { if (context != null) { context.Resume(); ShowFeedback("正在解除发送错误暂停…", false); } };
             FormClosing += delegate(object sender, FormClosingEventArgs e) { if (!CloseForExit) { e.Cancel = true; Hide(); } };
             ResizeBegin += delegate { dragging = true; }; ResizeEnd += delegate { dragging = false; if (deferred != null) ApplySnapshot(deferred); };
@@ -266,7 +274,7 @@ namespace CodexPushover
         public void ApplySnapshot(DashboardSnapshot s)
         {
             deferred = s; if (dragging || s.Key == lastSnapshot) return; lastSnapshot = s.Key;
-            updating = true; if (!working) { notifications.Checked = s.Enabled; startup.Checked = s.Startup; } updating = false;
+            updating = true; if (!working) { notifications.Checked = s.Enabled; startup.Checked = s.Startup; suggestions.Checked = s.Suggestions; inputRequests.Checked = s.InputRequests; } updating = false;
             string title = s.Maintenance ? "通知服务正在维护" : !s.Enabled ? "手机通知已暂停" : !s.Credentials ? "等待填写 Pushover 凭据" : s.Blocked ? "发送已暂停，等待处理" : "通知服务运行中";
             stateTitle.ForeColor = s.Blocked ? UiTheme.Error : UiTheme.Ink; ChangeText(stateTitle, title);
             string detail = (s.Credentials ? "凭据已保存" : "请填写 Pushover 凭据") + "  ·  " + (s.Guard ? "后台守护运行中" : "后台守护正在恢复") + (s.Quarantined > 0 ? "  ·  部分记录已隔离" : "");
@@ -276,7 +284,7 @@ namespace CodexPushover
         public void ShowFeedback(string text, bool error) { feedback.ForeColor = error ? UiTheme.Error : UiTheme.Muted; ChangeText(feedback, text); }
         public void SetWorking(bool value)
         {
-            working = value; save.Enabled = test.Enabled = notifications.Enabled = startup.Enabled = limit.Enabled = token.Enabled = user.Enabled = !value;
+            working = value; save.Enabled = test.Enabled = notifications.Enabled = startup.Enabled = suggestions.Enabled = inputRequests.Enabled = limit.Enabled = token.Enabled = user.Enabled = !value;
             resume.Enabled = !value && deferred != null && deferred.Blocked;
             if (!value && deferred != null) { lastSnapshot = ""; ApplySnapshot(deferred); }
         }

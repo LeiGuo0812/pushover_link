@@ -33,13 +33,14 @@ public static class UiRenderHarness
         Application.EnableVisualStyles(); Application.SetCompatibleTextRenderingDefault(false);
         switch(scenario)
         {
-            case "preview": Run(output,scenario,new Size(920,740),false,1f);break;
+            case "preview": Run(output,scenario,new Size(920,860),false,1f);break;
             case "minimum": Run(output,scenario,new Size(760,620),true,1f);break;
-            case "wide": Run(output,scenario,new Size(1200,740),false,1f);break;
-            case "scale-125": Run(output,scenario,new Size(920,740),false,1.25f);break;
-            case "scale-150": Run(output,scenario,new Size(920,740),false,1.5f);break;
-            case "scale-200": Run(output,scenario,new Size(920,740),false,2f);break;
-            case "native-dpi": Run(output,scenario,new Size(920,740),false,1f);break;
+            case "minimum-scrolled": Run(output,scenario,new Size(760,620),true,1f);break;
+            case "wide": Run(output,scenario,new Size(1200,860),false,1f);break;
+            case "scale-125": Run(output,scenario,new Size(920,860),false,1.25f);break;
+            case "scale-150": Run(output,scenario,new Size(920,860),false,1.5f);break;
+            case "scale-200": Run(output,scenario,new Size(920,860),false,2f);break;
+            case "native-dpi": Run(output,scenario,new Size(920,860),false,1f);break;
             default: throw new ArgumentException("Unknown preview scenario.");
         }
         string json = new JavaScriptSerializer { MaxJsonLength = 1000000 }.Serialize(new { method="Own WinForms control layout and DrawToBitmap; no tray, sender, API, production options or credential access", scenarios=Results });
@@ -62,6 +63,12 @@ public static class UiRenderHarness
                 form.ClientSize=new Size((int)Math.Round(size.Width*scale),(int)Math.Round(size.Height*scale));
             }
             for(int i=0;i<3;i++) { Layout(form); Application.DoEvents(); }
+            if (name == "minimum-scrolled")
+            {
+                var input = All(form).OfType<NumericUpDown>().First();
+                foreach (var panel in All(form).OfType<Panel>()) if (panel.AutoScroll) panel.ScrollControlIntoView(input);
+                Application.DoEvents();
+            }
             var nodes = new List<Node>(); Collect(form,form,"Form",false,nodes);
             var errors = new List<string>(); var ellipses = new List<string>(); var details = new List<object>();
             var client = form.ClientRectangle;
@@ -87,6 +94,7 @@ public static class UiRenderHarness
                     if(measured.Width+12>blue.Width || measured.Height+4>blue.Height) errors.Add(node.Path+" primary action text cramped");
                 }
                 if(c is NumericUpDown && (c.Width<50 || node.LayoutVisibleBounds.Width<50 || node.LayoutVisibleBounds.Height<c.Height-2)) errors.Add(node.Path+" numeric input collapsed/clipped: bounds="+node.Bounds+" visible="+node.LayoutVisibleBounds);
+                if(name == "minimum-scrolled" && c is NumericUpDown && node.VisibleBounds.Height<c.Height-2) errors.Add("Numeric input cannot be reached by scrolling.");
                 if(c is BlueSwitch)
                 {
                     float dpi; using(var g=c.CreateGraphics()) dpi=g.DpiX;
@@ -110,6 +118,7 @@ public static class UiRenderHarness
             }
             int scrollHeight=0,scrollViewport=0;
             foreach(Control c in All(form)) if(c is Panel && ((Panel)c).AutoScroll) { scrollHeight=((Panel)c).DisplayRectangle.Height;scrollViewport=c.ClientSize.Height; }
+            if (name == "preview" && scrollHeight > scrollViewport) errors.Add("Default window requires scrolling to see its settings.");
             Results.Add(new { scenario=name,constructorClient=new[]{constructorClient.Width,constructorClient.Height},clientSize=new[]{form.ClientSize.Width,form.ClientSize.Height},outerSize=new[]{form.Width,form.Height},scale=scale,autoScaleBefore=before.ToString(),autoScaleAfter=after.ToString(),currentAutoScale=form.CurrentAutoScaleDimensions.ToString(),errors=errors,expectedEllipsis=ellipses,scrollHeight=scrollHeight,scrollViewport=scrollViewport,leafCount=nodes.Count,details=details });
         }
     }
@@ -128,13 +137,14 @@ public static class UiRenderHarness
         if(leaf)
         {
             Point p=new Point(); Control part=c; while(part!=form && part!=null){p.Offset(part.Left,part.Top);part=part.Parent;}
-            Rectangle visible=new Rectangle(p,c.Size),layoutVisible=visible; Control ancestor=c.Parent;
+            Rectangle visible=new Rectangle(p,c.Size),layoutVisible=visible; Control ancestor=c.Parent; bool passedScroll=false;
             while(ancestor!=null && ancestor!=form)
             {
                 Point q=new Point(); Control item=ancestor; while(item!=form && item!=null){q.Offset(item.Left,item.Top);item=item.Parent;}
                 Rectangle parentBounds=new Rectangle(q,ancestor.ClientSize);
                 visible=Rectangle.Intersect(visible,parentBounds);
-                if(!(ancestor is Panel && ((Panel)ancestor).AutoScroll)) layoutVisible=Rectangle.Intersect(layoutVisible,parentBounds);
+                if(ancestor is Panel && ((Panel)ancestor).AutoScroll) passedScroll=true;
+                if(!passedScroll) layoutVisible=Rectangle.Intersect(layoutVisible,parentBounds);
                 ancestor=ancestor.Parent;
             }
             nodes.Add(new Node { Control=c,Path=path,Bounds=new Rectangle(p,c.Size),VisibleBounds=visible,LayoutVisibleBounds=layoutVisible,ScrollChild=scroll });

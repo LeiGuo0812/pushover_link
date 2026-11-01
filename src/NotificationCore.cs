@@ -50,6 +50,34 @@ namespace CodexPushover
         static Dictionary<string, object> D(object v) { return v as Dictionary<string, object> ?? Obj(); }
         static Dictionary<string, object> Copy(Dictionary<string, object> d) { return new Dictionary<string, object>(d); }
         static bool Exists(string name) { return File.Exists(PathAt(name)); }
+        public const string SuggestionOption = "notify_composer_suggestions";
+        public const string InputOption = "notify_input_requests";
+        public static bool OptionEnabled(string key)
+        { object value = Get(Optional(PathAt("notification-options.json")), key); return value is bool && (bool)value; }
+        public static void SetOption(string key, bool enabled)
+        {
+            if (key != SuggestionOption && key != InputOption) throw new ArgumentException("Unknown notification option.");
+            lock (cycleLock)
+            {
+                var options = ReadObject(PathAt("notification-options.json")); options[key] = enabled;
+                WriteObject(PathAt("notification-options.json"), options); Log("notification_option_updated");
+                if (!enabled) foreach (string file in Directory.GetFiles(PathAt("events"), "*.json"))
+                {
+                    string stateFile = Path.Combine(PathAt("state"), Path.GetFileName(file)); Dictionary<string, object> record, state;
+                    if (!ReadQueued(file, stateFile, out record, out state)) continue;
+                    string kind = S(Get(record, "notification_kind"));
+                    if (kind != (key == SuggestionOption ? "composer_suggestion" : "input_request") || S(Get(state, "outcome")) == "accepted") continue;
+                    state["outcome"] = "suppressed"; WriteObject(stateFile, state);
+                }
+            }
+        }
+        public static string InputEventId(string session, string turn, string call)
+        { return Hash("[" + JSString(session) + "," + JSString(turn) + ",\"input_request\"," + JSString(call) + "]"); }
+        static bool CategoryEnabled(Dictionary<string, object> record)
+        {
+            string kind = S(Get(record, "notification_kind"));
+            return kind == "composer_suggestion" ? OptionEnabled(SuggestionOption) : kind != "input_request" || OptionEnabled(InputOption);
+        }
 
         public static void Initialize(string directory)
         {
@@ -205,22 +233,25 @@ namespace CodexPushover
         {
             if (Exists("DISABLED")) return Outcome("disabled", null);
             string kind = S(Get(e, "hook_event_name"));
-            if (kind != "Stop" && kind != "UserPromptSubmit") return Outcome("ignored_event", null);
+            if (kind != "Stop" && kind != "UserPromptSubmit" && kind != "PreToolUse") return Outcome("ignored_event", null);
             if (B(Get(e, "agent_id")) || B(Get(e, "agent_type"))) return Outcome("ignored_subagent", null);
             string session = Get(e, "session_id") as string, turn = Get(e, "turn_id") as string;
             if (String.IsNullOrEmpty(session) || String.IsNullOrEmpty(turn) || (kind == "UserPromptSubmit" && !(Get(e, "prompt") is string)))
             { Log("missing_event_identifiers"); return Outcome("missing_identifiers_or_prompt", null); }
             string id = EventId(session, turn), now = Stamp();
+            if (kind == "PreToolUse") return HandleInputRequest(e, source, session, turn, now);
             if (kind == "UserPromptSubmit")
             {
                 if (IsComposerSuggestionRequest((string)e["prompt"]))
                 {
-                    // Keep only an exact-turn marker, so a restarted Stop handler can
-                    // ignore this app-generated request without retaining its context.
+                    // Keep only an exact-turn marker; the generated prompt may contain
+                    // conversation context that must not appear in a notification.
                     var marker = Obj(); marker["session_id"] = session; marker["turn_id"] = turn;
                     marker["composer_suggestion"] = true; marker["captured_at"] = now;
                     WriteObject(Path.Combine(PathAt("prompts"), id + ".json"), marker);
-                    Log("composer_suggestion_ignored"); return Outcome("ignored_suggestion", id);
+                    bool enabled = OptionEnabled(SuggestionOption);
+                    Log(enabled ? "composer_suggestion_captured" : "composer_suggestion_ignored");
+                    return Outcome(enabled ? "captured_suggestion" : "ignored_suggestion", id);
                 }
                 string input = VisibleInput((string)e["prompt"]), preview = Preview(input);
                 var p = Obj(); p["session_id"] = session; p["turn_id"] = turn; p["source"] = source;
@@ -228,21 +259,69 @@ namespace CodexPushover
                 WriteObject(Path.Combine(PathAt("prompts"), id + ".json"), p); Log("prompt_captured");
                 return Outcome("captured", id);
             }
-            if (IsComposerSuggestionTurn(id, session, turn))
+            bool suggestion = IsComposerSuggestionTurn(id, session, turn);
+            if (suggestion && !OptionEnabled(SuggestionOption))
             { Log("composer_suggestion_ignored"); return Outcome("ignored_suggestion", id); }
             string reply = Get(e, "last_assistant_message") as string ?? ""; reply = reply.Trim();
+            if (suggestion)
+            {
+                // Send only the proposed user-facing text, never the app-generated prompt.
+                try { reply = Get(Serializer().Deserialize<Dictionary<string, object>>(reply), "suggestion") as string ?? ""; }
+                catch { reply = ""; }
+                reply = reply.Trim();
+                if (reply == "") { Log("composer_suggestion_empty"); return Outcome("empty_suggestion", id); }
+            }
             string replyPreview = Preview(reply);
             var record = Obj(); record["id"] = id; record["source"] = source; record["session_id"] = session; record["turn_id"] = turn;
             record["created_at"] = now; record["format_version"] = 2; record["cwd"] = S(Get(e, "cwd"));
             record["cwd"] = S(record["cwd"]).Substring(0, Math.Min(S(record["cwd"]).Length, 4096));
             record["reply_preview"] = replyPreview; record["reply_was_cut"] = replyPreview.Length < reply.Length;
+            if (suggestion) record["notification_kind"] = "composer_suggestion";
             if (Get(e, "transcript_path") is string) { string t = (string)e["transcript_path"]; record["transcript_path"] = t.Substring(0, Math.Min(t.Length, 4096)); }
             var options = Optional(PathAt("notification-options.json"));
-            if (S(Get(options, "content_mode")) == "user_input")
+            if (!suggestion && S(Get(options, "content_mode")) == "user_input")
             {
                 record["format_version"] = 3; record["user_input_captured"] = false;
                 ApplyPrompt(record, id);
             }
+            return Enqueue(record);
+        }
+        static Dictionary<string, object> HandleInputRequest(Dictionary<string, object> e, string source, string session, string turn, string now)
+        {
+            if (!Regex.IsMatch(S(Get(e, "tool_name")), @"^(functions\.)?request_user_input(_async)?$")) return Outcome("ignored_tool", null);
+            if (!OptionEnabled(InputOption)) return Outcome("input_notifications_disabled", null);
+            string call = Get(e, "tool_use_id") as string;
+            if (String.IsNullOrEmpty(call)) return Outcome("missing_tool_use_id", null);
+            var input = Get(e, "tool_input") as Dictionary<string, object>;
+            var questions = Get(input, "questions") as IList;
+            if (questions == null || questions.Count == 0) return Outcome("missing_questions", null);
+            var lines = new List<string>();
+            foreach (object item in questions)
+            {
+                var q = item as Dictionary<string, object>;
+                string title = Get(q, "question") as string ?? Get(q, "title") as string;
+                if (String.IsNullOrWhiteSpace(title)) continue;
+                lines.Add(Preview(title.Trim()));
+                var choices = Get(q, "options") as IList;
+                if (choices != null) foreach (object choice in choices)
+                {
+                    string label = choice as string ?? Get(choice as Dictionary<string, object>, "label") as string;
+                    if (!String.IsNullOrWhiteSpace(label)) lines.Add("• " + Preview(label.Trim()));
+                    if (lines.Count >= 20) break;
+                }
+                if (lines.Count >= 20) break;
+            }
+            if (lines.Count == 0) return Outcome("missing_questions", null);
+            string text = String.Join("\n", lines.ToArray()), preview = Preview(text);
+            var record = Obj(); record["id"] = InputEventId(session, turn, call); record["session_id"] = session; record["turn_id"] = turn;
+            record["tool_use_id"] = call; record["source"] = source; record["created_at"] = now; record["format_version"] = 2;
+            record["notification_kind"] = "input_request"; record["cwd"] = Shorten(S(Get(e, "cwd")), 4096, "");
+            record["reply_preview"] = preview; record["reply_was_cut"] = preview.Length < text.Length;
+            return Enqueue(record);
+        }
+        static Dictionary<string, object> Enqueue(Dictionary<string, object> record)
+        {
+            string id = S(record["id"]);
             string target = Path.Combine(PathAt("events"), id + ".json"), tmp = target + "." + Guid.NewGuid().ToString("N") + ".tmp";
             string outcome = "queued";
             try
@@ -283,6 +362,17 @@ namespace CodexPushover
             string project = S(Get(metadata, "project_name")); if (project == "") project = slash >= 0 ? cwd.Substring(slash + 1) : cwd;
             if (project == "") project = "未知项目";
             project = Shorten(Regex.Replace(project, @"\s+", " ").Trim(), 160, "…");
+            string kind = S(Get(record, "notification_kind"));
+            if (kind == "composer_suggestion" || kind == "input_request")
+            {
+                bool suggestion = kind == "composer_suggestion";
+                string specialPrefix = "项目名称：" + project + (suggestion ? "\n输入框建议：\n" : "\n需要你回答：\n");
+                string footer = suggestion ? "\n请在 Codex 查看并选择是否采用。" : "\n请返回 Codex 回答或选择。";
+                string content = S(Get(record, "reply_preview")); int available = 1024 - CharacterCount(specialPrefix + footer);
+                bool cut = B(Get(record, "reply_was_cut")) || CharacterCount(content) > available;
+                if (cut) content = Shorten(content, available, "…（已截断）");
+                return new Dictionary<string, object> { {"title", suggestion ? "Codex 有新的输入建议" : "Codex 需要你回答"}, {"message", specialPrefix + content + footer}, {"truncated", cut}, {"metadata_source", "cwd"} };
+            }
             string middle;
             if (N(Get(record, "format_version")) == 3)
             {
@@ -519,6 +609,8 @@ namespace CodexPushover
             long format = N(Get(record, "format_version"));
             if (format < 0 || format > 3) return false;
             if ((format == 0 || format == 1) && (!(Get(record, "title") is string) || !(Get(record, "message") is string))) return false;
+            if (S(Get(record, "notification_kind")) == "input_request")
+                return session != "" && turn != "" && S(Get(record, "tool_use_id")) != "" && InputEventId(session, turn, S(record["tool_use_id"])) == id;
             if (session != "" && turn != "") return EventId(session, turn) == id;
             // The original direct-send script created frozen format-0/1 test records
             // before official hook identifiers existed. Keep their original immutable ID.
@@ -528,7 +620,7 @@ namespace CodexPushover
         static bool ValidState(Dictionary<string, object> state)
         {
             string outcome = S(Get(state, "outcome"));
-            if (outcome == "accepted") return true; // Preserve accepted history even if optional old fields differ.
+            if (outcome == "accepted" || outcome == "suppressed") return true; // Preserve terminal history.
             if (outcome != "" && outcome != "blocked" && outcome != "retry") return false;
             object frozen = Get(state, "notification");
             if (frozen == null) return true;
@@ -577,14 +669,15 @@ namespace CodexPushover
             {
                 string stateFile = Path.Combine(PathAt("state"), Path.GetFileName(file)); Dictionary<string, object> record, state;
                 if (!ReadQueued(file, stateFile, out record, out state)) continue;
-                if (S(Get(state, "outcome")) == "accepted") continue;
+                if (S(Get(state, "outcome")) == "accepted" || S(Get(state, "outcome")) == "suppressed") continue;
+                if (!CategoryEnabled(record)) { state["outcome"] = "suppressed"; WriteObject(stateFile, state); Log("notification_category_suppressed"); continue; }
                 if (S(Get(state, "outcome")) == "blocked" && S(Get(state, "fingerprint")) == fingerprint) continue;
                 var notification = Get(state, "notification") as Dictionary<string, object>;
                 if (notification == null)
                 {
                     var resolved = Copy(record); int version = (int)N(Get(record, "format_version"));
                     if (version == 3) ApplyPrompt(resolved, S(Get(record, "id")));
-                    var metadata = version == 2 || version == 3 ? LookupMetadata(record) : Obj();
+                    var metadata = (version == 2 || version == 3) && S(Get(record, "notification_kind")) == "" ? LookupMetadata(record) : Obj();
                     if (version == 3 && S(Get(metadata, "input_session_id")) == S(Get(record, "session_id")) &&
                         S(Get(metadata, "input_turn_id")) == S(Get(record, "turn_id")) && S(Get(metadata, "input_lookup")) == "matched" && Get(metadata, "user_input_preview") is string)
                     {
@@ -602,6 +695,7 @@ namespace CodexPushover
                 }
                 if (pause || Exists("MAINTENANCE") || Exists("APP_MIGRATING")) return "maintenance";
                 if (Exists("DISABLED")) return "disabled";
+                if (!CategoryEnabled(record)) { state["outcome"] = "suppressed"; WriteObject(stateFile, state); continue; }
                 control["next_at"] = now + 900000; WriteObject(PathAt("control.json"), control);
                 SendResult result;
                 var fault = Optional(PathAt("diagnostic-network-failure-once.json"));
@@ -626,7 +720,7 @@ namespace CodexPushover
         }
         public static Dictionary<string, object> Status()
         {
-            var result = Obj(); foreach (string k in new [] { "total", "hook", "test", "recovered", "accepted", "blocked", "pending", "quarantined" }) result[k] = 0L;
+            var result = Obj(); foreach (string k in new [] { "total", "hook", "test", "recovered", "accepted", "blocked", "pending", "quarantined", "suppressed" }) result[k] = 0L;
             foreach (string file in Directory.GetFiles(PathAt("events"), "*.json"))
             {
                 result["total"] = N(result["total"]) + 1;
@@ -637,11 +731,12 @@ namespace CodexPushover
                 catch (InvalidOperationException) { result["quarantined"] = N(result["quarantined"]) + 1; result["blocked"] = N(result["blocked"]) + 1; result["recovered"] = N(result["recovered"]) + 1; continue; }
                 string source = S(Get(r, "source")); string category = source == "hook" ? "hook" : source == "recovered" ? "recovered" : "test";
                 result[category] = N(result[category]) + 1;
-                string outcome = S(Get(s, "outcome")); category = outcome == "accepted" ? "accepted" : outcome == "blocked" ? "blocked" : "pending";
+                string outcome = S(Get(s, "outcome")); category = outcome == "suppressed" ? "suppressed" : outcome == "accepted" ? "accepted" : outcome == "blocked" ? "blocked" : "pending";
                 result[category] = N(result[category]) + 1;
             }
             var control = ReadObject(PathAt("control.json"));
             result["enabled"] = !Exists("DISABLED"); result["credentials_ready"] = Credentials() != null; result["sender_blocked"] = B(Get(control, "blocked"));
+            result[SuggestionOption] = OptionEnabled(SuggestionOption); result[InputOption] = OptionEnabled(InputOption);
             result["next_attempt_at"] = N(Get(control, "next_at")) > 0 ? At(N(control["next_at"])) : null; result["busy"] = busy; result["maintenance"] = pause || Exists("MAINTENANCE") || Exists("APP_MIGRATING");
             return result;
         }
